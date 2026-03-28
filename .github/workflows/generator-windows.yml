@@ -18,6 +18,17 @@ on:
         required: true
         default: ''
         type: string
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      zip_url_base:
+        required: true
+        type: string
+      zip_filename:
+        required: true
+        type: string
 
 
 env:
