@@ -1,5 +1,4 @@
 # AppVeyor CI - rdgen Windows custom client build
-# Public project - free for open source
 version: 1.0.{build}
 
 image: Visual Studio 2022
@@ -13,7 +12,6 @@ configuration:
 environment:
   RUST_VERSION: "1.75"
   FLUTTER_VERSION: "3.24.5"
-  NDK_VERSION: "r27c"
   GH_TOKEN:
     secure: EhF2GvhpJQGGX3OxpPtB7w3uLs6FkHNBBZLRsP6gMKM
   ZIP_PASSWORD:
@@ -22,62 +20,49 @@ environment:
     secure: EhF2GvhpJQGGX3OxpPtB7w3uLs6FkHNBBZLRsP6gMKM
 
 install:
-  - cmd: echo Build %APPVEYOR_BUILD_NUMBER% on %APPVEYOR_REPO_BRANCH%
-
-  - ps: |
-      choco install -y git python3 cmake ninja nsis imagemagick llvm nasm --no-progress 2>&1 | Out-Null
-      refreshenv
-
-  - ps: |
-      if (!(Test-Path "$env:USERPROFILE\.cargo\bin\rustc.exe")) {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest -Uri https://win.rustup.rs -OutFile rustup-init.exe -UseBasicParsing
-        Start-Process -FilePath .\rustup-init.exe -ArgumentList "-y","--default-toolchain","%RUST_VERSION%" -Wait -NoNewWindow
-        Remove-Item rustup-init.exe -Force -ErrorAction SilentlyContinue
-      }
-      & "$env:USERPROFILE\.cargo\bin\rustup" default %RUST_VERSION% 2>&1 | Out-Null
-      & "$env:USERPROFILE\.cargo\bin\rustup" target add x86_64-pc-windows-msvc 2>&1 | Out-Null
-
-  - ps: |
-      $flutterDir = "$env:USERPROFILE\flutter"
-      if (!(Test-Path "$flutterDir\bin\flutter.bat")) {
-        $flutterUrl = "https://storage.googleapis.com/flutter_infra_release/releases/stable/windows/flutter-windows-%FLUTTER_VERSION%-stable.zip"
-        Invoke-WebRequest -Uri $flutterUrl -OutFile flutter.zip -UseBasicParsing
-        Expand-Archive flutter.zip -DestinationPath "$env:USERPROFILE" -Force
-        Remove-Item flutter.zip -Force
-      }
-      $env:Path = "$flutterDir\bin;" + $env:Path
-      & "$flutterDir\bin\flutter.bat" config --no-analytics 2>&1 | Out-Null
-
-  - cmd: git config --global core.autocrlf true
+  - cmd: echo Build %APPVEYOR_BUILD_NUMBER% on %APPVEYOR_REPO_BRANCH% commit %APPVEYOR_REPO_COMMIT%
+  - cmd: git config --global core.autocrtf true
   - cmd: git config --global core.longpaths true
 
 build_script:
+  # Install tools via direct download (no choco)
+  - cmd: |
+      where git || echo Git not found
+      where python || echo Python not found
+      where cmake || echo CMake not found
+      where ninja || echo Ninja not found
+      rustc --version || echo Rust not found
+      cargo --version || echo Cargo not found
+
+  # Clone RustDesk
   - ps: |
       Set-Location $env:APPVEYOR_BUILD_FOLDER
       Write-Host "Cloning RustDesk..."
-      git clone --depth 1 --recurse-submodules --branch master https://github.com/rustdesk/rustdesk.git .\rustdesk_src 2>&1
+      git clone --depth 1 --recurse-submodules --branch master https://github.com/rustdesk/rustdesk.git .\rustdesk_src 2>&1 | Out-Host
       Set-Location .\rustdesk_src
-      git submodule update --init --recursive 2>&1 | Out-Null
+      git submodule update --init --recursive 2>&1 | Out-Host
       Write-Host "Clone done"
 
+  # Flutter texture renderer fix
   - ps: |
       Set-Location $env:APPVEYOR_BUILD_FOLDER\rustdesk_src
       $old = "2ded7f146437a761ffe6981e2f742038f85ca68d"
       $new = "08a471bb8ceccdd50483c81cdfa8b81b07b14b87"
       $f = Get-Content flutter\pubspec.lock -Raw
-      if ($f -match $old) { $f -replace $old, $new | Set-Content flutter\pubspec.lock -NoNewline }
+      if ($f -match $old) { $f -replace $old, $new | Set-Content flutter\pubspec.lock -NoNewline; Write-Host "pubspec.lock patched" }
       $g = Get-Content flutter\pubspec.yaml -Raw
-      if ($g -match $old) { $g -replace $old, $new | Set-Content flutter\pubspec.yaml -NoNewline }
-      Write-Host "Flutter patches done"
+      if ($g -match $old) { $g -replace $old, $new | Set-Content flutter\pubspec.yaml -NoNewline; Write-Host "pubspec.yaml patched" }
 
+  # Build Flutter
   - ps: |
       Set-Location $env:APPVEYOR_BUILD_FOLDER\rustdesk_src
       $env:Path = "$env:USERPROFILE\flutter\bin;" + $env:Path
       Write-Host "Building Flutter..."
-      & "$env:USERPROFILE\flutter\bin\flutter.bat" pub get 2>&1 | Out-Null
+      & "$env:USERPROFILE\flutter\bin\flutter.bat" pub get 2>&1 | Out-Host
       & "$env:USERPROFILE\flutter\bin\flutter.bat" build windows --release 2>&1 | Out-Host
+      Write-Host "Flutter done"
 
+  # Build Rust
   - ps: |
       Set-Location $env:APPVEYOR_BUILD_FOLDER\rustdesk_src
       $env:RUSTUP_HOME = "$env:USERPROFILE\.rustup"
@@ -85,27 +70,28 @@ build_script:
       $env:Path = "$env:CARGO_HOME\bin;" + $env:Path
       Write-Host "Building Rust..."
       cargo build --release 2>&1 | Out-Host
+      Write-Host "Rust done"
 
+  # Collect artifacts
   - ps: |
       Set-Location $env:APPVEYOR_BUILD_FOLDER
       New-Item -ItemType Directory -Force -Path SignOutput | Out-Null
       $src = "$env:APPVEYOR_BUILD_FOLDER\rustdesk_src"
-      if (Test-Path "$src\target\release\rustdesk.exe") {
-        Copy-Item "$src\target\release\rustdesk.exe" "SignOutput\" -Force
+      $exe1 = "$src\target\release\rustdesk.exe"
+      if (Test-Path $exe1) {
+        Copy-Item $exe1 "SignOutput\rustdesk.exe" -Force
+        Write-Host "Copied rustdesk.exe"
       }
-      $flutterExe = Get-ChildItem "$src\flutter\build\windows" -Filter "*.exe" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
-      if ($flutterExe) {
-        Copy-Item $flutterExe.FullName "SignOutput\flutter.exe" -Force
-      }
-      Write-Host "Artifacts:"
+      Get-ChildItem "$src\flutter\build\windows" -Filter "*.exe" -Recurse -File -ErrorAction SilentlyContinue | Copy-Item -Destination SignOutput\ -ErrorAction SilentlyContinue
       Get-ChildItem SignOutput | Format-Table Name, Length -AutoSize
+      Write-Host "Build complete"
 
 on_failure:
   - ps: |
       Write-Host "Build failed"
-      if (![string]::IsNullOrEmpty("$env:GENURL")) {
+      if (![string]::IsNullOrEmpty($env:GENURL)) {
         try {
-          $body = @{ uuid = "$env:BUILD_UUID"; status = "failed" } | ConvertTo-Json
+          $body = @{ uuid = $env:BUILD_UUID; status = "failed" } | ConvertTo-Json
           Invoke-RestMethod -Uri "$env:GENURL/build_complete" -Method POST -Body $body -ContentType "application/json" 2>&1 | Out-Null
         } catch { }
       }
