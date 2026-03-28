@@ -1,0 +1,22 @@
+name: Fix zip filename
+description: Renames config.json to secrets.json in zip
+runs:
+  using: composite
+  steps:
+    - name: Fix filename
+      shell: bash
+      run: |
+        python3 << PYEOF
+import zipfile, os
+with zipfile.ZipFile('secrets.zip', 'r') as zin:
+    names = zin.namelist()
+    print('Files in zip:', names)
+    with zipfile.ZipFile('fixed.zip', 'w', compression=zipfile.ZIP_DEFLATED) as zout:
+        for name in names:
+            data = zin.read(name)
+            new_name = 'secrets.json' if name == 'config.json' else name
+            zout.writestr(new_name, data)
+            print(f'  {name} -> {new_name}')
+os.replace('fixed.zip', 'secrets.zip')
+print('Fixed zip created')
+PYEOF
