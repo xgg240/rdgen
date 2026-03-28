@@ -1,9 +1,11 @@
 name: Fix zip filename
-description: Renames config.json to secrets.json in zip
+description: Renames config.json to secrets.json in zip (handling AES encryption)
 runs:
   using: composite
   steps:
     - name: Fix filename
+      env:
+        ZIP_PASSWORD: ${{ vars.ZIP_PASSWORD }}
       shell: bash
       run: |
         pip install pyzipper -q
