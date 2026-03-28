@@ -4,12 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'version to buld'
+        description: 'version to build'
         required: true
         default: ''
         type: string
-      zip_url:
-        description: 'url to zip of json'
+      zip_url_base:
+        description: 'base URL of rdgen server (e.g. http://139.196.226.164:8001)'
+        required: true
+        default: ''
+        type: string
+      zip_filename:
+        description: 'filename of the zip on rdgen server (e.g. secrets_<uuid>.zip)'
         required: true
         default: ''
         type: string
@@ -45,7 +50,8 @@ jobs:
   setup:
     uses: ./.github/workflows/fetch-encrypted-secrets.yml
     with:
-      zip_url: ${{ inputs.zip_url }}
+      zip_url_base: ${{ inputs.zip_url_base }}
+      zip_filename: ${{ inputs.zip_filename }}
 
   generate-bridge:
     uses: ./.github/workflows/bridge.yml
