@@ -6,4 +6,5 @@ runs:
     - name: Fix filename
       shell: bash
       run: |
+        pip install pyzipper -q
         python3 ./.github/actions/fix-zip/fix_zip.py
