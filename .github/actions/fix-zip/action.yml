@@ -6,7 +6,7 @@ runs:
     - name: Fix filename
       shell: bash
       run: |
-        python3 << PYEOF
+        python3 << 'PYEOF'
 import zipfile, os
 with zipfile.ZipFile('secrets.zip', 'r') as zin:
     names = zin.namelist()
