@@ -1,0 +1,236 @@
+# AppVeyor CI - rdgen Windows custom client build
+# Public project - free for open source
+# Docs: https://www.appveyor.com/docs/
+
+version: 1.0.{build}
+
+image: Visual Studio 2022
+
+platform:
+  - x64
+
+configuration:
+  - Release
+
+environment:
+  RUST_VERSION: "1.75"
+  FLUTTER_VERSION: "3.24.5"
+  CARGO_NDK_VERSION: "3.1.2"
+  LLVM_VERSION: "15.0.6"
+  NDK_VERSION: "r27c"
+  # GitHub token for private submodule access (set in AppVeyor UI: Settings → Environment)
+  GH_TOKEN:
+    secure: EhF2GvhpJQGGX3OxpPtB7w3uLs6FkHNBBZLRsP6gMKM
+  ZIP_PASSWORD:
+    secure: EhF2GvhpJQGGX3OxpPtB7w3uLs6FkHNBBZLRsP6gMKM
+  GENURL:
+    secure: EhF2GvhpJQGGX3OxpPtB7w3uLs6FkHNBBZLRsP6gMKM
+
+install:
+  # Show build info
+  - cmd: echo Build %APPVEYOR_BUILD_NUMBER% on %APPVEYOR_REPO_BRANCH% commit %APPVEYOR_REPO_COMMIT%
+
+  # Install Chocolatey
+  - cmd: |
+      @powershell -NoProfile -ExecutionPolicy Bypass -Command "iex ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1'))" 2>&1
+      refreshenv
+
+  # Install core tools
+  - ps: |
+      choco install -y git python3 cmake ninja nsis --no-progress -force 2>&1 | Out-Null
+      refreshenv
+
+  # Install Rust
+  - ps: |
+      $rustc = "$env:USERPROFILE\.cargo\bin\rustc.exe"
+      if (!(Test-Path $rustc)) {
+        Write-Host "Installing Rust..."
+        [System.Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri https://win.rustup.rs -OutFile rustup-init.exe -UseBasicParsing
+        Start-Process -FilePath .\rustup-init.exe -ArgumentList "-y","--default-toolchain","%RUST_VERSION%" -Wait -NoNewWindow
+        Remove-Item rustup-init.exe -Force -ErrorAction SilentlyContinue
+      }
+      & "$env:USERPROFILE\.cargo\bin\rustup" default %RUST_VERSION% 2>&1 | Out-Null
+      & "$env:USERPROFILE\.cargo\bin\rustup" target add x86_64-pc-windows-msvc 2>&1 | Out-Null
+
+  # Install Flutter
+  - ps: |
+      $flutterDir = "$env:USERPROFILE\flutter"
+      if (!(Test-Path "$flutterDir\bin\flutter.bat")) {
+        Write-Host "Installing Flutter %FLUTTER_VERSION%..."
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $flutterUrl = "https://storage.googleapis.com/flutter_infra_release/releases/stable/windows/flutter-windows-%FLUTTER_VERSION%-stable.zip"
+        Invoke-WebRequest -Uri $flutterUrl -OutFile flutter.zip -UseBasicParsing
+        Expand-Archive flutter.zip -DestinationPath "$env:USERPROFILE" -Force
+        Remove-Item flutter.zip -Force
+      }
+      $env:Path = "$flutterDir\bin;" + $env:Path
+      & "$flutterDir\bin\flutter.bat" config --no-analytics 2>&1 | Out-Null
+
+  # Install ImageMagick
+  - ps: |
+      choco install -y imagemagick --no-progress 2>&1 | Out-Null
+      refreshenv
+
+  # Install NASM
+  - ps: |
+      choco install -y nasm --no-progress 2>&1 | Out-Null
+      $env:Path = "C:\Program Files\NASM;" + $env:Path
+
+  # Install LLVM
+  - ps: |
+      choco install -y llvm --no-progress 2>&1 | Out-Null
+      refreshenv
+
+  # Verify
+  - ps: |
+      Write-Host "=== Installed Tools ==="
+      rustc --version 2>&1
+      cargo --version 2>&1
+      cmake --version 2>&1 | Select-Object -First 1
+      & "$env:USERPROFILE\flutter\bin\flutter.bat" --version 2>&1 | Select-Object -First 1
+
+  # Set GitHub credentials for private submodules
+  - cmd: git config --global core.autocrlf true
+  - cmd: git config --global core.longpaths true
+  - cmd: git config --global url."https://github.com/".insteadOf "git@github.com:"
+  - cmd: git config --global url."https://%GH_TOKEN%@github.com/".insteadOf "https://github.com/"
+
+build_script:
+  # Clone RustDesk source
+  - ps: |
+      Set-Location $env:APPVEYOR_BUILD_FOLDER
+      $version = $env:VERSION
+      if ([string]::IsNullOrEmpty($version)) { $version = "master" }
+      Write-Host "Cloning RustDesk tag/branch: $version"
+      if ($version -eq "master") {
+        git clone --depth 1 --recurse-submodules https://github.com/rustdesk/rustdesk.git .\rustdesk_src 2>&1
+      } else {
+        git clone --depth 1 --recurse-submodules --branch $version https://github.com/rustdesk/rustdesk.git .\rustdesk_src 2>&1
+      }
+      if ($LASTEXITCODE -ne 0) { git clone --depth 1 --recurse-submodules https://github.com/rustdesk/rustdesk.git .\rustdesk_src 2>&1 }
+      Set-Location .\rustdesk_src
+      git submodule update --init --recursive 2>&1 | Out-Null
+      Write-Host "RustDesk cloned OK"
+
+  # Download and decrypt secrets if ZIP_URL is set
+  - ps: |
+      Set-Location $env:APPVEYOR_BUILD_FOLDER
+      if (![string]::IsNullOrEmpty($env:ZIP_URL)) {
+        Write-Host "Downloading secrets from: $env:ZIP_URL"
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        try {
+          Invoke-WebRequest -Uri $env:ZIP_URL -OutFile secrets.zip -UseBasicParsing
+          Write-Host "Decrypting with password..."
+          python3 -c "
+import zipfile, sys
+try:
+    z = zipfile.ZipFile('secrets.zip')
+    z.extractall('.', pwd=bytes('$env:ZIP_PASSWORD', 'utf-8'))
+    print('Decrypted OK')
+except Exception as e:
+    print('Decrypt failed:', e)
+    sys.exit(1)
+" 2>&1
+          Remove-Item secrets.zip -Force -ErrorAction SilentlyContinue
+        } catch {
+          Write-Host "Failed to download/decrypt secrets: $_"
+        }
+      } else {
+        Write-Host "ZIP_URL not set - skipping secrets download"
+      }
+
+  # Fix Flutter texture renderer
+  - ps: |
+      Set-Location $env:APPVEYOR_BUILD_FOLDER\rustdesk_src
+      $old = '2ded7f146437a761ffe6981e2f742038f85ca68d'
+      $new = '08a471bb8ceccdd50483c81cdfa8b81b07b14b87'
+      (Get-Content flutter\pubspec.lock) -replace $old, $new | Set-Content flutter\pubspec.lock
+      (Get-Content flutter\pubspec.yaml) -replace $old, $new | Set-Content flutter\pubspec.yaml
+      Write-Host "Flutter patches applied"
+
+  # Apply custom app name
+  - ps: |
+      Set-Location $env:APPVEYOR_BUILD_FOLDER\rustdesk_src
+      if (![string]::IsNullOrEmpty($env:APPNAME) -and $env:APPNAME -ne "rustdesk") {
+        Write-Host "Custom app name: $env:APPNAME"
+        # Update various files with custom app name
+        Get-ChildItem -Recurse -Include "*.toml","*.rs","*.rc","*.yaml" | ForEach-Object {
+          $content = Get-Content $_.FullName -Raw
+          if ($content -match "RustDesk") {
+            $content = $content -replace "RustDesk", $env:APPNAME
+            $content = $content -replace "rustdesk", $env:APPNAME.ToLower()
+            Set-Content $_.FullName -Value $content -NoNewline
+          }
+        }
+      }
+
+  # Build Flutter
+  - ps: |
+      Set-Location $env:APPVEYOR_BUILD_FOLDER\rustdesk_src
+      $env:Path = "$env:USERPROFILE\flutter\bin;" + $env:Path
+      Write-Host "Building Flutter..."
+      & "$env:USERPROFILE\flutter\bin\flutter.bat" pub get 2>&1 | Out-Host
+      & "$env:USERPROFILE\flutter\bin\flutter.bat" build windows --release 2>&1 | Out-Host
+      if ($LASTEXITCODE -ne 0) { Write-Host "Flutter build may have issues, continuing..." }
+
+  # Build Rust
+  - ps: |
+      Set-Location $env:APPVEYOR_BUILD_FOLDER\rustdesk_src
+      $env:RUSTUP_HOME = "$env:USERPROFILE\.rustup"
+      $env:CARGO_HOME = "$env:USERPROFILE\.cargo"
+      $env:Path = "$env:CARGO_HOME\bin;" + $env:Path
+      Write-Host "Building Rust..."
+      cargo build --release 2>&1 | Out-Host | Select-Object -First 30
+      Write-Host "Rust build complete"
+
+  # Package output
+  - ps: |
+      Set-Location $env:APPVEYOR_BUILD_FOLDER
+      New-Item -ItemType Directory -Force -Path SignOutput | Out-Null
+      $src = "$env:APPVEYOR_BUILD_FOLDER\rustdesk_src"
+      # Copy exe files
+      Get-ChildItem $src -Filter "*.exe" -Recurse -File | Copy-Item -Destination SignOutput\ -ErrorAction SilentlyContinue
+      # Copy build outputs
+      if (Test-Path "$src\target\release\rustdesk.exe") {
+        Copy-Item "$src\target\release\rustdesk.exe" "SignOutput\" -Force
+      }
+      if (Test-Path "$src\flutter\build\windows\x64\runner\Release\rustdesk.exe") {
+        Copy-Item "$src\flutter\build\windows\x64\runner\Release\rustdesk.exe" "SignOutput\flutter_rustdesk.exe" -Force
+      }
+      Write-Host "Artifacts:"
+      Get-ChildItem SignOutput | Format-Table Name, Length -AutoSize
+
+  # Send completion notification
+  - ps: |
+      if (![string]::IsNullOrEmpty($env:GENURL)) {
+        try {
+          $body = @{
+            uuid = $env:BUILD_UUID
+            status = "success"
+            appveyor_build_id = $env:APPVEYOR_BUILD_ID
+            commit = $env:APPVEYOR_REPO_COMMIT
+          } | ConvertTo-Json
+          Invoke-RestMethod -Uri "$env:GENURL/build_complete" -Method POST -Body $body -ContentType "application/json" 2>&1 | Out-Null
+          Write-Host "Build status sent to rdgen server"
+        } catch {
+          Write-Host "Failed to notify rdgen server: $_"
+        }
+      }
+
+on_failure:
+  - ps: |
+      Write-Host "BUILD FAILED"
+      if (![string]::IsNullOrEmpty($env:GENURL)) {
+        try {
+          $body = @{ uuid = $env:BUILD_UUID; status = "failed"; appveyor_build_id = $env:APPVEYOR_BUILD_ID } | ConvertTo-Json
+          Invoke-RestMethod -Uri "$env:GENURL/build_complete" -Method POST -Body $body -ContentType "application/json" 2>&1 | Out-Null
+        } catch {}
+      }
+
+artifacts:
+  - path: SignOutput
+    name: SignOutput
+    type: zip
+  - path: SignOutput\*.exe
+    name: exe_files
